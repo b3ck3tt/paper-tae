@@ -12,6 +12,7 @@ OpenML access**, and re-run the full evaluation from scratch if desired.
 ```bash
 pip install -r requirements.txt
 python reproduce_tables.py
+python family_level.py        # long-tail family-level cell of Table 4 + size of the "other" bucket
 ```
 
 Prints Table 1 (per-model quality), Table 2 (mean-difference vs. portfolio, BH-corrected — 10/11 worse),
@@ -21,12 +22,14 @@ and Table 5 (task-invariance / degeneracy of top-1 picks), computed from `result
 
 ```
 reproduce_tables.py          reproduce the main tables from the CSVs
+family_level.py              family-level re-scoring of the long-tail rankings (Table 4, family x long tail)
 requirements.txt
 src/
   llm_paper4.py              evaluation harness (build | dryrun | run <model> [N] | eval)
   llm_sig.py                 paired significance, mixed-effects, BH correction, tier tests
 results/
   ground_truth.csv           (task_id, candidate_id, accuracy) — the held-out labels, self-contained
+  catalog.csv                (candidate_id, flow_id, flow_name) — candidate IDs mapped to OpenML flows
   rankings_main200.csv       per-model top-to-bottom rankings, 11 models x 200 tasks (+ token usage)
   llm_metrics_per_task.csv   per-task nregret@1 / hit@1 / Spearman, per model
   baselines_main200.csv      trained text-LTR / kNN / portfolio / random, per task (200-subset)
