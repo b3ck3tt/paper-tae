@@ -23,9 +23,9 @@ GPT and any open-weight family DeepInfra hosts. Examples:
 Keep the SAME pack (build once) so every vendor ranks the identical tasks/candidates -> comparable.
 """
 import warnings; warnings.filterwarnings("ignore")
-import sys, os, json, re, joblib, numpy as np, pandas as pd
+import sys, os, json, re, time, joblib, numpy as np, pandas as pd
 from pathlib import Path
-OUT = Path(os.environ.get("P4_OUT", "results_recommender_paper4")); OUT.mkdir(exist_ok=True)
+OUT = Path(os.environ.get("P4_OUT", "results/results_recommender_paper4")); OUT.mkdir(exist_ok=True)
 SCR = Path("scratch")
 # Sub-experiments (full-1236 stability, repeated runs) override output dir / pack path so they don't
 # collide with the main 200-task results. Default: pack lives inside OUT.
@@ -34,6 +34,7 @@ PACK = Path(os.environ.get("P4_PACK", str(OUT / "pack.joblib")))
 RNG = np.random.default_rng(int(os.environ.get("P4_SEED", "7")))  # P4_SEED for a fresh subset (stability)
 N_TASKS = int(os.environ.get("N_TASKS", "200"))
 MIN_CAND = 15
+MAX_ATTEMPTS = int(os.environ.get("P4_MAX_ATTEMPTS", "3"))   # retries for empty/truncated answers
 META = ["NumberOfInstances","NumberOfFeatures","NumberOfClasses","NumberOfNumericFeatures",
         "NumberOfSymbolicFeatures","MajorityClassSize","MinorityClassSize","NumberOfInstancesWithMissingValues"]
 
@@ -54,7 +55,28 @@ PRICING = {
     "deepinfra:Qwen/Qwen2.5-72B-Instruct":             dict(inp=0.23, out=0.40, cw=0.23, cr=0.23),
     "deepinfra:deepseek-ai/DeepSeek-V3":               dict(inp=0.40, out=0.89, cw=0.40, cr=0.40),
     "deepinfra:meta-llama/Meta-Llama-3.1-8B-Instruct": dict(inp=0.03, out=0.05, cw=0.03, cr=0.03),
+    # Turbo (FP8) substitutes; the original Llama ids are no longer served (DeepInfra models list, 27 Oct 2026)
+    "deepinfra:meta-llama/Llama-3.3-70B-Instruct-Turbo":     dict(inp=0.10, out=0.32, cw=0.10, cr=0.10),
+    "deepinfra:meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": dict(inp=0.02, out=0.04, cw=0.02, cr=0.02),
 }
+if os.environ.get("P4_PRICES_2026_10"):   # current list prices for the CC18 re-run (DeepInfra models list, 27 Oct 2026)
+    PRICING["deepinfra:Qwen/Qwen2.5-72B-Instruct"] = dict(inp=0.36, out=0.40, cw=0.36, cr=0.36)
+    PRICING["deepinfra:deepseek-ai/DeepSeek-V3"] = dict(inp=0.32, out=0.89, cw=0.32, cr=0.32)
+
+# Spend guard across several concurrent runs: P4_BUDGET_DIRS = ':'-separated output dirs whose api_log.jsonl
+# entries are summed (list prices above); a run stops before a new call once the total reaches P4_BUDGET_STOP.
+def spent_so_far():
+    tot = 0.0
+    for d in filter(None, os.environ.get("P4_BUDGET_DIRS", "").split(":")):
+        f = Path(d) / "api_log.jsonl"
+        if not f.exists(): continue
+        for line in open(f):
+            try: r = json.loads(line)
+            except Exception: continue
+            if "inp" not in r: continue
+            pr = _price(r["model"][:-6] if r["model"].endswith("-think") else r["model"])
+            tot += (r["inp"]*pr["inp"] + r["out"]*pr["out"] + r["cw"]*pr["cw"] + r["cr"]*pr["cr"]) / 1e6
+    return tot
 def _price(model): return PRICING.get(model) or dict(inp=1.0, out=3.0, cw=1.0, cr=1.0)  # fallback
 def est_tokens(s): return int(len(s) / 3.5)  # rough; real usage comes from API response
 
@@ -65,8 +87,8 @@ def clean_flow(name):
     return n.strip()[:80]
 
 def load_longtail():
-    coll = joblib.load("minimal_cache_cc18/longtail_collected.joblib")
-    tasks_all = joblib.load("minimal_cache_cc18/longtail_tasks.joblib")
+    coll = joblib.load("data/minimal_cache_cc18/longtail_collected.joblib")
+    tasks_all = joblib.load("data/minimal_cache_cc18/longtail_tasks.joblib")
     ev = pd.concat(coll["evals"].values(), ignore_index=True)
     ev["flow_id"] = pd.to_numeric(ev["flow_id"], errors="coerce"); ev["value"] = pd.to_numeric(ev["value"], errors="coerce")
     ev = ev.dropna(subset=["flow_id","value"]); ev["flow_id"] = ev["flow_id"].astype(int)
@@ -180,7 +202,9 @@ def _call_anthropic(client, api_model, prefix, suffix, ncand, think):
     u = msg.usage
     return txt, dict(inp=u.input_tokens, out=u.output_tokens,
                      cw=getattr(u, "cache_creation_input_tokens", 0) or 0,
-                     cr=getattr(u, "cache_read_input_tokens", 0) or 0)
+                     cr=getattr(u, "cache_read_input_tokens", 0) or 0,
+                     request_id=getattr(msg, "_request_id", None), response_id=msg.id, resp_model=msg.model,
+                     stop=msg.stop_reason, truncated=msg.stop_reason == "max_tokens")
 
 def _call_openai(client, api_model, prefix, suffix, ncand):
     # prefix as system message (auto prefix-caching on OpenAI); suffix as user turn.
@@ -202,7 +226,10 @@ def _call_openai(client, api_model, prefix, suffix, ncand):
     ct = getattr(u, "completion_tokens", 0) or 0
     ptd = getattr(u, "prompt_tokens_details", None)
     cached = (getattr(ptd, "cached_tokens", 0) or 0) if ptd is not None else 0
-    return txt, dict(inp=pt - cached, out=ct, cw=0, cr=cached)  # cached reads billed at cr rate
+    fin = resp.choices[0].finish_reason
+    return txt, dict(inp=pt - cached, out=ct, cw=0, cr=cached,  # cached reads billed at cr rate
+                     request_id=getattr(resp, "_request_id", None), response_id=resp.id, resp_model=resp.model,
+                     stop=fin, truncated=fin == "length")
 
 def run(model, N=None):
     d = joblib.load(PACK)
@@ -225,22 +252,60 @@ def run(model, N=None):
     for i, p in enumerate(packs):
         tid = p["tid"]
         prev = done.get(tid) or done.get(str(tid))
-        if prev and "ranking" in prev:   # skip only successful tasks; retry errors
+        if prev and ("ranking" in prev or prev.get("final")):   # skip successes and final failures; retry errors
             continue
+        stop = float(os.environ.get("P4_BUDGET_STOP", "0") or 0)
+        if stop and spent_so_far() >= stop:
+            joblib.dump(done, resfile)
+            print(f"BUDGET STOP: spend across {os.environ.get('P4_BUDGET_DIRS')} >= ${stop:.0f}", flush=True)
+            raise SystemExit(3)
         valid = set(p["cids"]); ncand = len(p["cids"])
-        try:
-            if provider == "anthropic":
-                txt, u = _call_anthropic(client, api_model, prefix, p["suffix"], ncand, think)
-            else:
-                txt, u = _call_openai(client, api_model, prefix, p["suffix"], ncand)
-            ranking = _parse_ranking(txt, valid)
-            for k in usage_tot: usage_tot[k] += u[k]
+        attempts = []
+        for attempt in range(MAX_ATTEMPTS):            # empty or truncated answers are re-asked, never dropped
+            try:
+                if provider == "anthropic":
+                    txt, u = _call_anthropic(client, api_model, prefix, p["suffix"], ncand, think)
+                else:
+                    txt, u = _call_openai(client, api_model, prefix, p["suffix"], ncand)
+                ranking = _parse_ranking(txt, valid)
+                with open(OUT / "responses.jsonl", "a") as fh:      # raw answer text, for parser/empty audits
+                    fh.write(json.dumps({"tid": int(tid), "model": model, "attempt": attempt,
+                                         "response_id": u.get("response_id"), "text": txt}) + "\n")
+                for k in usage_tot: usage_tot[k] += u[k]
+                rec = {"attempt": attempt, "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "model": model,
+                       **{k: u[k] for k in ("request_id", "response_id", "resp_model", "stop", "truncated",
+                                            "inp", "out", "cw", "cr")}, "n_parsed": len(ranking)}
+                with open(OUT / "api_log.jsonl", "a") as fh:
+                    fh.write(json.dumps({"tid": int(tid), **rec}) + "\n")
+                rec["ranking"] = ranking; rec["usage"] = u      # every attempt's ranking is kept (protocol rule, 27 Oct)
+                attempts.append(rec)
+                if ranking and not u["truncated"]:
+                    break
+            except Exception as e:
+                attempts.append({"attempt": attempt, "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                 "error": str(e)[:200]})
+                with open(OUT / "api_log.jsonl", "a") as fh:
+                    fh.write(json.dumps({"tid": int(tid), "model": model, **attempts[-1]}) + "\n")
+                ranking, u = None, None
+        # protocol rule (27 Oct 2026): a normally finished attempt with a ranking wins; otherwise the attempt with the
+        # LONGEST valid ranking (selection by length only, never by accuracy); none with a valid id -> missing.
+        good = [x for x in attempts if x.get("ranking") and not x.get("truncated")]
+        part = [x for x in attempts if x.get("ranking")]
+        pick = good[-1] if good else (max(part, key=lambda x: len(x["ranking"])) if part else None)
+        ranking, u = (pick["ranking"], pick["usage"]) if pick else (None, None)
+        for x in attempts:                                   # keep the result file compact: rankings of attempts
+            x.pop("usage", None)
+        if ranking:
             done[tid] = {"ranking": ranking, "n_parsed": len(ranking), "n_cand": len(valid),
+                         "picked_attempt": pick["attempt"],
                          # per-task usage = a "reasoning effort / complexity" signal (esp. tok_out for thinking)
                          "tok_in": u["inp"], "tok_out": u["out"],
-                         "tok_cache_read": u["cr"], "tok_cache_write": u["cw"]}
-        except Exception as e:
-            done[tid] = {"error": str(e)[:200]}
+                         "tok_cache_read": u["cr"], "tok_cache_write": u["cw"],
+                         "truncated": u["truncated"], "attempts": attempts}
+        else:
+            answered = attempts and all("error" not in x for x in attempts)   # model answered every time: final
+            done[tid] = {"error": (attempts[-1].get("error") if attempts else "no attempt") or "empty ranking",
+                         "attempts": attempts, "final": bool(answered)}
         if (i + 1) % 3 == 0 or i + 1 == len(packs):
             joblib.dump(done, resfile)
             print(f"  {i+1}/{len(packs)} done", flush=True)
@@ -285,7 +350,7 @@ def evaluate():
     print(L.groupby("model").agg(n=("tid","nunique"), nregret1=("nregret@1","mean"),
                                  hit1=("hit@1","mean"), spearman=("spearman","mean")).round(4).to_string())
     tasks = set(L["tid"])
-    pt = pd.read_csv("results_recommender_longtail_full/ranking_metrics_per_task.csv")
+    pt = pd.read_csv("results/results_recommender_longtail_full/ranking_metrics_per_task.csv")
     pt = pt[(pt.experiment=="tfidf_meta") & (pt.task_id.isin(tasks))]
     print(f"\nbaselines on the same {len(tasks)} tasks:")
     print(pt.groupby("method").agg(nregret1=("nregret@1","mean"), hit1=("hit@1","mean"),
