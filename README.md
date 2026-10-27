@@ -1,10 +1,12 @@
-# Can We Trust "LLM-as-Recommender"? — code & data
+# Frozen LLMs as Recommenders for AutoML Pipeline Selection: Can We Trust the Evaluation? — code & data
 
-Anonymous supplementary material for the TAE (NeurIPS 2026) submission
-*"Can We Trust 'LLM-as-Recommender'? A Cross-Vendor, Difficulty-Graded Evaluation of Frozen LLMs for
-AutoML Pipeline Selection."*
+Code and data for the paper
 
-This repository lets a reviewer **reproduce every table from the released CSVs with no API keys and no
+> Roman Neruda, Juan Carlos Figueroa-García, Carlos Alberto Franco Franco.
+> *Frozen LLMs as Recommenders for AutoML Pipeline Selection: Can We Trust the Evaluation?*
+> TAE (Trust-AI-Eval): Can We Trust AI Evaluation? — workshop at NeurIPS 2026.
+
+This repository lets anyone **reproduce every table from the released CSVs with no API keys and no
 OpenML access**, and re-run the full evaluation from scratch if desired.
 
 ## Quick reproduction (no API, ~10 s)
@@ -55,6 +57,17 @@ Notes: OpenAI reasoning models must run at low `reasoning_effort` (default effor
 terminate on large-candidate ranking prompts — see the paper's Threats section). DeepInfra does not
 prefix-cache. Per-task token usage is logged (used for the effort analysis).
 
+## Citation
+
+```bibtex
+@inproceedings{neruda2026frozenllm,
+  author    = {Neruda, Roman and Figueroa-Garc{\'i}a, Juan Carlos and Franco Franco, Carlos Alberto},
+  title     = {Frozen {LLMs} as Recommenders for {AutoML} Pipeline Selection: Can We Trust the Evaluation?},
+  booktitle = {TAE (Trust-AI-Eval): Can We Trust AI Evaluation? Workshop at NeurIPS 2026},
+  year      = {2026}
+}
+```
+
 ## License
 
-Released for review. MIT.
+MIT, see `LICENSE`.
