@@ -53,6 +53,11 @@ results/
                              token usage, timestamp, number of parsed ids
     reask_archive_cc18.jsonl earlier attempts of the tasks that were re-asked (see below)
     rankings_cc18_deepseek_aug2026.csv  the August 2026 DeepSeek-V3 run (no API log), for Appendix A
+    request_config_cc18.csv  request id -> configuration of every attempt behind a released ranking
+  cc18_all/                  supplementary all-toolkit CC18 pack (72 tasks), mentioned in Sec. 4.3, not in Table 4
+    ground_truth_cc18_all.csv, rankings_cc18_all.csv (8 models x 72 tasks), portfolio_cc18_all.csv,
+    api_log_cc18_all.jsonl, reask_archive_cc18_all.jsonl, request_config_cc18_all.csv (same formats as cc18/)
+    score_cc18_all.md        output of src/score_cc18_rerun.py for this pack
   turbo50/                   Llama-Turbo (FP8) control on 50 long-tail tasks: rankings, task list, API log
 ```
 
@@ -91,6 +96,22 @@ Changes relative to the submitted version of the paper:
 - **Family baseline.** With portfolio (a) the LLMs appear to win at the family level; with portfolio (b) no
   model wins on either benchmark. Results without the "other" family bucket are printed as well.
 
+- **API log labels.** In `api_log_cc18.jsonl` (and for part of `api_log_cc18_all.jsonl`) calls of the
+  Sonnet 5 + thinking configuration are logged under the base id `claude-sonnet-5`; the harness was fixed
+  afterwards. `request_config_*.csv` maps every request id behind a released ranking to its configuration
+  (every such request id is present in the API log). API-log lines with no entry in that map are earlier
+  attempts whose results were superseded when the task was asked again, or requests that failed.
+
+## Supplementary all-toolkit CC18 pack (Sec. 4.3)
+
+The same harness, prompt and retry rule on all 72 OpenML-CC18 tasks with candidates from all toolkits
+(catalog 3,073 flows; `src/llm_pack_cc18_p4.py`, pack A). Eight configurations were run: DeepSeek-V3 and
+Qwen2.5-72B are served with a 32,768-token limit, below this prompt (DeepSeek-V3 calls returned HTTP 400 and
+are in the API log; Qwen2.5-72B was not run), and Claude Fable 5 ended every attempt at the output-token limit with an
+empty ranking (stopped after 8 attempts). Sonnet 5 + thinking gave no ranking on one task (3903), so the
+common set has 71 tasks. On it no model is significantly better than the flow portfolio (0.090) and 4 of 8 are
+significantly worse (BH q < 0.05); no model is significantly better than family portfolio (a). Full output:
+`results/cc18_all/score_cc18_all.md`. This pack is not part of Table 4, and `table4.py` does not read it.
 
 ## Re-running the LLM evaluation (needs API keys)
 
